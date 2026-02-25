@@ -1,12 +1,15 @@
 package main
 
 import (
+	"context"
 	"fmt"
 	"net"
 	"net/http"
 	"os"
+	"os/signal"
 	"strconv"
 	"strings"
+	"syscall"
 	"time"
 
 	"github.com/fatih/color"
@@ -22,15 +25,22 @@ type ConnectionTest struct {
 }
 
 func main() {
+	// Setup context with cancellation
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	// Setup signal handling for graceful shutdown
+	sigChan := make(chan os.Signal, 1)
+	signal.Notify(sigChan, syscall.SIGINT, syscall.SIGTERM)
+
+	go func() {
+		<-sigChan
+		fmt.Println("\nReceived shutdown signal, cancelling...")
+		cancel()
+	}()
+
 	if len(os.Args) < 2 {
-		fmt.Println(color.CyanString("apiconnector - API Connectivity Tester"))
-		fmt.Println()
-		fmt.Println("Usage: apiconnector <service1> <service2> ...")
-		fmt.Println("Format: name=http://url[:port]")
-		fmt.Println()
-		fmt.Println("Examples:")
-		fmt.Println("  apiconnector api=http://localhost:8080/health")
-		fmt.Println("  db=postgres://localhost:5432")
+		printUsage()
 		os.Exit(1)
 	}
 
@@ -42,7 +52,22 @@ func main() {
 		tests = append(tests, test)
 	}
 
-	runConnectionTests(tests)
+	// Run tests with context
+	if err := runConnectionTestsWithContext(ctx, tests); err != nil {
+		fmt.Printf("Error: %v\n", err)
+		os.Exit(1)
+	}
+}
+
+func printUsage() {
+	fmt.Println(color.CyanString("apiconnector - API Connectivity Tester"))
+	fmt.Println()
+	fmt.Println("Usage: apiconnector <service1> <service2> ...")
+	fmt.Println("Format: name=http://url[:port]")
+	fmt.Println()
+	fmt.Println("Examples:")
+	fmt.Println("  apiconnector api=http://localhost:8080/health")
+	fmt.Println("  db=postgres://localhost:5432")
 }
 
 func parseTestConfig(config string) ConnectionTest {
@@ -55,12 +80,22 @@ func parseTestConfig(config string) ConnectionTest {
 	return test
 }
 
-func runConnectionTests(tests []ConnectionTest) {
+func runConnectionTests(tests []ConnectionTest) error {
+	return runConnectionTestsWithContext(context.Background(), tests)
+}
+
+func runConnectionTestsWithContext(ctx context.Context, tests []ConnectionTest) error {
 	var success, failure int
 
 	for i := range tests {
+		select {
+		case <-ctx.Done():
+			return fmt.Errorf("context cancelled")
+		default:
+		}
+
 		test := &tests[i]
-		test.Status, test.Latency, test.Error = testConnect(test.URL)
+		test.Status, test.Latency, test.Error = testConnect(ctx, test.URL)
 
 		if test.Error == "" {
 			success++
@@ -73,10 +108,23 @@ func runConnectionTests(tests []ConnectionTest) {
 
 	fmt.Println()
 	fmt.Printf("Summary: %d OK, %d FAIL\n", success, failure)
+
+	if failure > 0 {
+		return fmt.Errorf("%d connection failures", failure)
+	}
+
+	return nil
 }
 
-func testConnect(url string) (string, time.Duration, string) {
+func testConnect(ctx context.Context, url string) (string, time.Duration, string) {
 	start := time.Now()
+
+	// Check context cancellation
+	select {
+	case <-ctx.Done():
+		return "ERROR", 0, "context cancelled"
+	default:
+	}
 
 	// Parse URL
 	parsedURL := parseURL(url)
@@ -103,7 +151,13 @@ func testConnect(url string) (string, time.Duration, string) {
 			},
 		}
 
-		resp, err := client.Get(url)
+		// Create request with context
+		req, err := http.NewRequestWithContext(ctx, "GET", url, nil)
+		if err != nil {
+			return "ERROR", 0, fmt.Sprintf("Request creation error: %v", err)
+		}
+
+		resp, err := client.Do(req)
 		if err != nil {
 			return "FAIL", 0, fmt.Sprintf("HTTP error: %v", err)
 		}
