@@ -1,0 +1,17 @@
+# config.yaml - default configuration for apiconnector
+# ----------------------------------------------------
+# This file defines the list of services to test.
+# Each entry follows the same syntax used on the CLI:
+#   name=url[:port]
+#
+# Optional fields (future‑proofing):
+#   timeout: duration (e.g., "5s", "1m")
+#   headers: map of HTTP headers to send
+#   tls_skip_verify: true|false
+#
+# Example:
+targets:
+  - api=http://localhost:8080/health
+  - db=postgres://localhost:5432
+  - storage=http://localhost:9000/minio/health
+  # - custom=specific=https://example.com:8443/api
